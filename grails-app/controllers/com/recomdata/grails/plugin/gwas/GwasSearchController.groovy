@@ -4,6 +4,7 @@ import au.com.bytecode.opencsv.CSVWriter
 import com.recomdata.transmart.domain.searchapp.FormLayout
 import grails.converters.JSON
 import org.codehaus.groovy.grails.web.json.JSONObject
+import org.codehaus.groovy.grails.web.mapping.LinkGenerator
 import org.transmart.biomart.BioAssayAnalysis
 import org.transmart.biomart.Experiment
 import org.transmart.searchapp.*
@@ -27,6 +28,8 @@ class GwasSearchController {
     def RModulesOutputRenderService
     def springSecurityService
     def gwasSearchService
+    def sendFileService
+    LinkGenerator grailsLinkGenerator
 
     /**
      * Renders a UI for selecting regions by gene/RSID or chromosome.
@@ -286,7 +289,7 @@ class GwasSearchController {
         }
         else {
             //Otherwise, run the query and recache the returned data
-			if (sortField.equals('null')) {sortField = 'data.p_value';}
+			if (sortField.equals('null')) {sortField = 'data.log_p_value'; order='desc';}
             queryResult = regionSearchService.getAnalysisData(analysisIds, regions, max, offset, cutoff, sortField, order, search, type, geneNames, transcriptGeneNames, true)
             analysisData = queryResult.results
             totalCount = queryResult.total
@@ -399,6 +402,42 @@ class GwasSearchController {
 
     }
 
+    private String getCachedImageDir() {
+        grailsApplication.config.com.recomdata.rwg.qqplots.cacheImages
+    }
+
+    private File cachedImagePathFor(Long analysisId) {
+        new File(new File(cachedImageDir, analysisId as String), 'QQPlot.png')
+    }
+
+    private String imageUrlFor(Long analysisId) {
+        grailsLinkGenerator.link(
+                controller: 'gwasSearch',
+                action: 'downloadQQPlotImage',
+                absolute: true,
+                params: [analysisId: analysisId])
+    }
+
+    def downloadQQPlotImage() {
+        // Should probably check access
+
+        def analysisId = params.getLong('analysisId')
+        if (!analysisId) {
+            log.warn "Request without analysisId"
+            render status: 404
+            return
+        }
+
+        def targetFile = cachedImagePathFor(analysisId)
+
+        if (!targetFile.isFile()) {
+            log.warn "Request for $targetFile, but such file does not exist"
+            render status: 404
+            return
+        }
+
+        sendFileService.sendFile servletContext, request, response, targetFile
+    }
 
     def getQQPlotImage = {
 
@@ -407,24 +446,17 @@ class GwasSearchController {
         try {
             //We need to determine the data type of this analysis so we know where to pull the data from.
             def currentAnalysis = BioAssayAnalysis.get(params.analysisId)
-			String qqPlotDir = grailsApplication.config.com.recomdata.rwg.qqplots.cacheImages;
 			String explodedDeplDir = servletContext.getRealPath("/");
-			String tempImageFolder = explodedDeplDir + grailsApplication.config.com.recomdata.rwg.qqplots.temporaryImageFolder
-			
-			//get rdc-modules plugin info
-			def pluginManager = PluginManagerHolder.pluginManager
-			def plugin = pluginManager.getGrailsPlugin("rdc-rmodules")
-			String pluginDir = "rdc-rmodules-"+plugin.version;
-			pluginDir =  "${explodedDeplDir}/plugins/${pluginDir}/Rscripts/";
-			
-			def qqPlotExistingImage = qqPlotDir + File.separator + params.analysisId +  File.separator + "QQPlot.png"
+			String tempImageFolder = grailsApplication.config.com.recomdata.plugins.tempFolderDirectory
 
-			File qqPlotFile = new File(qqPlotExistingImage)
+            //get rdc-modules plugin info
+			String pluginDir =  grailsApplication.config.RModules.pluginScriptDirectory;
+
+			File cachedQqPlotFile = cachedImagePathFor(params.getLong('analysisId'))
 			
 			// use QQPlots cached images if they are available. QQPlots takes >10 minutes to run and only needs to be generated once per analysis.
-			if (qqPlotFile.exists()) {
-				def qqPlotImageURL = gwasWebService.moveCachedImageFile(qqPlotExistingImage,"QQPlots"+File.separator+"qqplot-"+params.analysisId + ".png",tempImageFolder)
-				returnJSON['imageURL'] = qqPlotImageURL
+			if (cachedQqPlotFile.exists()) {
+				returnJSON['imageURL'] = imageUrlFor(params.getLong('analysisId'))
 				render returnJSON as JSON;
 				return;
 			}
@@ -556,13 +588,10 @@ class GwasSearchController {
             }
             else
             {
-
-				FileUtils.copyFile(new File(imagePath), new File(qqPlotExistingImage));
-				def qqPlotImageURL = gwasWebService.moveCachedImageFile(qqPlotExistingImage,"QQPlots"+File.separator+"qqplot-"+params.analysisId + ".png",tempImageFolder)
-				returnJSON['imageURL'] = qqPlotImageURL
+				FileUtils.copyFile(new File(imagePath), cachedQqPlotFile);
+				returnJSON['imageURL'] = imageUrlFor(currentAnalysis.id)
 				render returnJSON as JSON;
 				return;
-
             }
         }
         catch (Exception e) {
@@ -692,8 +721,19 @@ class GwasSearchController {
         if (search != null) { filter.search = search }
 
         def analysisIds = session['solrAnalysisIds']
+        // following code will limit analysis ids to ones that the user is allowed to access
+        def user=AuthUser.findByUsername(springSecurityService.getPrincipal().username)
+        def secObjs=getExperimentSecureStudyList()
+        def analyses = BioAssayAnalysis.executeQuery("select id, name, etlId from BioAssayAnalysis b order by b.name")
+        analyses=analyses.findAll{!secObjs.containsKey(it[2]) || !gwasWebService.getGWASAccess(it[2], user).equals("Locked") }
+        analyses=analyses.findAll {analysisIds.contains(it[0])} // get intersection of all analyses id and allowed ids
 
-        session['filterTableView'] = filter
+        def allowedAnalysisIds = [] // will be used to his temporary list
+
+        analyses.each { allowedAnalysisIds.add(it[0])} // fill list with ids from analyses object
+        analysisIds = allowedAnalysisIds // replace all analysis ids with intersection ids
+
+        //session['filterTableView'] = filter
 
 /*		if (analysisIds.size() >= 100) {
 			render(text: "<p>The table view cannot be used with more than 100 analyses (${analysisIds.size()} analyses in current search results). Narrow down your results by adding filters.</p>")
@@ -820,14 +860,20 @@ class GwasSearchController {
                     }
                 }
             }
-            else if (s.startsWith("GENESIG")) {
-                //Expand regions to genes and get their limits
-                s = s.substring(8)
+            else if (s.startsWith("GENESIG") || s.startsWith("GENELIST")  ) {
+
+                while (s.startsWith("GENELIST")) {
+                    s = s.substring(9)
+                } 
+
+                while (s.startsWith("GENESIG")) {
+                    s = s.substring(8)
+                }
                 def sigIds = s.split("\\|")
                 for (sigId in sigIds) {
 
-                    def sigSearchKeyword = SearchKeyword.get(sigId as long)
-                    def sig = GeneSignature.get(sigSearchKeyword.bioDataId)
+                    //def sigSearchKeyword = SearchKeyword.get(sigId as long)
+                    def sig = GeneSignature.get(sigId as long) // sigSearchKeyword.bioDataId)
                     def sigItems = GeneSignatureItem.createCriteria().list() {
                         eq('geneSignature', sig)
                         or {
@@ -870,7 +916,7 @@ class GwasSearchController {
                 def geneIds = s.split("\\|")
                 for (geneString in geneIds) {
                     def geneSearchItem = SearchKeyword.findByUniqueId(geneString)
-		    def geneId = geneSearchItem.id 
+                    def geneId = geneSearchItem.id 
                     def limits = regionSearchService.getGeneLimits(geneId, '19', 0L)
                     regions.push([gene: geneId, chromosome: limits.get('chrom'), low: limits.get('low'), high: limits.get('high'), ver: "19"])
                 }
@@ -880,6 +926,8 @@ class GwasSearchController {
                 s = s.substring(4)
                 def rsIds = s.split("\\|")
                 for (rsId in rsIds) {
+                    //def snpSearchItem = SearchKeyword.findByUniqueId(rsId)
+                    //def snpId = snpSearchItem.id 
                     def limits = regionSearchService.getSnpLimits(rsId as long, '19', 0L)
                     regions.push([gene: rsId, chromosome: limits.get('chrom'), low: limits.get('low'), high: limits.get('high'), ver: "19"])
                 }
@@ -893,14 +941,23 @@ class GwasSearchController {
         def genes = []
 
         for (s in solrSearch) {
-            if (s.startsWith("GENESIG")) {
+            if (s.startsWith("GENESIG")|| s.startsWith("GENELIST"))  {
+
+                while (s.startsWith("GENELIST")) {
+                    s = s.substring(9)
+                } 
+
+                while (s.startsWith("GENESIG")) {
+                    s = s.substring(8)
+                }
+
                 //Expand regions to genes and get their names
-                s = s.substring(8)
+                //s = s.substring(8)
                 def sigIds = s.split("\\|")
                 for (sigId in sigIds) {
-                    def sigSearchKeyword = SearchKeyword.get(sigId as long)
+                    //def sigSearchKeyword = SearchKeyword.get(sigId as long)
                     def sigItems = GeneSignatureItem.createCriteria().list() {
-                        eq('geneSignature', GeneSignature.get(sigSearchKeyword.bioDataId))
+                        eq('geneSignature', GeneSignature.get(sigId))  //sigSearchKeyword.bioDataId))
                         like('bioDataUniqueId', 'GENE%')
                     }
                     for (sigItem in sigItems) {
@@ -917,7 +974,9 @@ class GwasSearchController {
                 s = s.substring(5)
                 def geneIds = s.split("\\|")
                 for (geneString in geneIds) {
-                    def geneId = geneString as long
+                    //def geneId = geneString as long
+                    def geneSearchItem = SearchKeyword.findByUniqueId(geneString)
+                    def geneId = geneSearchItem.id
                     def searchKeyword = SearchKeyword.get(geneId)
                     genes.push(searchKeyword.keyword)
                 }
@@ -1001,9 +1060,9 @@ class GwasSearchController {
         analysisArr.push(analysisId)
         def query
         if (analysis.assayDataType == "GWAS" || analysis.assayDataType == "Metabolic GWAS" || analysis.assayDataType == "GWAS Fail") {
-            query=regionSearchService.getAnalysisData(analysisArr, regions, max, 0, cutoff, "data.p_value", "asc", null, "gwas", geneNames,transcriptGeneNames,false)
+            query=regionSearchService.getAnalysisData(analysisArr, regions, max, 0, cutoff, "data.log_p_value", "desc", null, "gwas", geneNames,transcriptGeneNames,false)
         } else {
-            query=regionSearchService.getAnalysisData(analysisArr, regions, max, 0, cutoff, "data.p_value", "asc", null, "eqtl", geneNames,transcriptGeneNames,false)
+            query=regionSearchService.getAnalysisData(analysisArr, regions, max, 0, cutoff, "data.log_p_value", "desc", null, "eqtl", geneNames,transcriptGeneNames,false)
         }
 		log.debug("Before the result")
         def dataset = query.results

@@ -82,14 +82,15 @@ class GwasWebService {
 	"""
     //added additional query to pull gene strand information from the annotation.
     def final getGeneStrand = '''
-		select "STRAND" from DEAPP.de_gene_info where "GENE_SOURCE_ID"=1 and "ENTREZ_ID"=?
+		select strand from DEAPP.de_gene_info where gene_source_id=1 and entrez_id=?
 	'''
 
     def final getRecombinationRatesForGeneQuery = '''
-    	select position,rate 
-    	from biomart.bio_recombination_rates recomb, 
-    	(select CASE WHEN "CHROM_START" between 0 and ? THEN 0 ELSE ("CHROM_START"-?) END s, ("CHROM_STOP"+?) e, "CHROM" from deapp.de_gene_info g where "GENE_SYMBOL"=? order by "CHROM_START") geneSub 
-    	where recomb.chromosome=(geneSub."CHROM") and position between s and e order by position
+        select position,rate
+        from biomart.bio_recombination_rates recomb,
+        (select CASE WHEN chrom_start between 0 and ? THEN 0 ELSE (chrom_start-?) END s, (chrom_stop+?) e, chrom
+        from deapp.de_gene_info g where gene_symbol=? order by chrom_start) geneSub
+        where recomb.chromosome=(geneSub.chrom) and position between s and e order by position
     '''
 
     def final snpSearchQuery = """
@@ -130,7 +131,7 @@ class GwasWebService {
             if(rs.next()){
                 def high = rs.getLong("HIGH");
                 def low = rs.getLong("LOW");
-                def chrom = rs.getLong("CHROM")
+                def chrom = rs.getString("CHROM")
                 return [low, high, chrom]
             }
         }finally{
@@ -333,13 +334,13 @@ class GwasWebService {
 		{
 			def tokens=getSecureTokensWithAccessForUser(user);
 			//tokens.each{ k, v -> log.debug( "${k}:${v}") }
-			if(tokens.containsKey(study_id)) //null tokens are assumed to be unlocked
+			if(tokens.containsKey("EXP:"+study_id)) //null tokens are assumed to be unlocked
 			{
-					return tokens[study_id]; //found access for this token so put in access level
+                            return tokens["EXP:"+study_id]; //found access for this token so put in access level
 			}
 			else {
-					return "Locked"; //didn't find authorization for this token
-				}
+                            return "Locked"; //didn't find authorization for this token
+                        }
 			
 		}
 	
@@ -553,7 +554,7 @@ class GwasWebService {
         def results = []
         try{
             while(rs.next()){
-                results.push([rs.getString("RS_ID"), rs.getLong("CHROM"), rs.getLong("POS"), rs.getDouble("LOG_P_VALUE"), rs.getString("ANALYSIS_NAME"),
+                results.push([rs.getString("RS_ID"), rs.getString("CHROM"), rs.getLong("POS"), rs.getDouble("LOG_P_VALUE"), rs.getString("ANALYSIS_NAME"),
                 rs.getString("gene"), rs.getString("exon_intron"), rs.getDouble("recombination_rate"), rs.getString("regulome_score")])
             }
             return results
@@ -566,10 +567,18 @@ class GwasWebService {
     }
 
     def recombinationRateBySnpQuery = """
+WITH snp_info AS (
+    SELECT DISTINCT
+      pos - ? as low,
+      pos + ? as high,
+      chrom
+    FROM DEAPP.DE_RC_SNP_INFO
+    WHERE RS_ID=? and hg_version=?
+)
 SELECT chromosome, position, rate, map FROM BIOMART.BIO_RECOMBINATION_RATES
-WHERE POSITION > (SELECT (pos-?) as low FROM DEAPP.DE_RC_SNP_INFO WHERE RS_ID=? and hg_version=?)
-AND POSITION < (SELECT (pos+?) as high FROM DEAPP.DE_RC_SNP_INFO WHERE RS_ID=? and hg_version=?)
-AND CHROMOSOME = (SELECT chrom FROM DEAPP.DE_RC_SNP_INFO WHERE RS_ID=? and hg_version=?) order by position
+WHERE POSITION > (SELECT low FROM snp_info)
+AND POSITION < (SELECT high FROM snp_info)
+AND CHROMOSOME = (SELECT chrom FROM snp_info) order by position
 """
 
     def getRecombinationRateBySnp(snp, range, hgVersion) {
@@ -584,13 +593,9 @@ AND CHROMOSOME = (SELECT chrom FROM DEAPP.DE_RC_SNP_INFO WHERE RS_ID=? and hg_ve
         //Prepare the SQL statement.
         stmt = con.prepareStatement(query);
         stmt.setLong(1, range)
-        stmt.setString(2, snp)
-        stmt.setString(3, hgVersion)
-        stmt.setLong(4, range)
-        stmt.setString(5, snp)
-        stmt.setString(6, hgVersion)
-        stmt.setString(7, snp)
-        stmt.setString(8, hgVersion)
+        stmt.setLong(2, range)
+        stmt.setString(3, snp)
+        stmt.setString(4, hgVersion)
 
         rs = stmt.executeQuery();
 
@@ -680,55 +685,5 @@ AND CHROMOSOME = (SELECT chrom FROM DEAPP.DE_RC_SNP_INFO WHERE RS_ID=? and hg_ve
 		}
 		
 		return filePath
-	}
-	
-	/*
-	 * This moves an image file to the temporary directory so it can be rendered to the user.
-	 */
-	def moveImageFile(currentFileLocation, newImageFileName, moveToDirectoryName)
-   {
-	   String tempImageFolder = grailsApplication.config.com.recomdata.rwg.qqplots.temporaryImageFolderFullPath
-	   String tempImageJobFolder = "${tempImageFolder}" + File.separator + "${moveToDirectoryName}" + File.separator
-	   
-	   //For each of the image files we find, move them to the new directory.
-	   String tempImageLocation = "${tempImageJobFolder}" + File.separator + newImageFileName
-
-	   //Move the image to a location where we can actually render it.
-	   File oldImage = new File(currentFileLocation);
-	   File newImage = new File(tempImageLocation);
-	   //TODO move FileUtils to Core
-	   FileUtils.copyFile(oldImage,newImage)
-	   
-	   String currentLink = "${imageURL}${moveToDirectoryName}/${newImageFileName}"
-	   
-	   //Delete the old directory.
-	   
-	   return currentLink
-   }
-	
-	
-	def moveCachedImageFile(currentFileLocation, newImageFileName, moveToDirectoryName)
-	{
-
-		String tempImageJobFolder = grailsApplication.config.com.recomdata.rwg.qqplots.temporaryImageFolder
-		def imageURL = grailsApplication.config.imageURL
-		
-		//For each of the image files we find, move them to the new directory.
-		String tempImageLocation = moveToDirectoryName+File.separator + newImageFileName
-		//Move the image to a location where we can actually render it.
-		File oldImage = new File(currentFileLocation);
-		File newImage = new File(tempImageLocation);
- 
-		if (!newImage.exists()) {
-		
-			FileUtils.copyFile(oldImage,newImage)
-			
-		}
-		
-		String currentLink = "../${tempImageJobFolder}/${newImageFileName}"
-		
-		//Delete the old directory.
-		
-		return currentLink
 	}
 }

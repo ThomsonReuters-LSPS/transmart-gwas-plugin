@@ -3,6 +3,8 @@ grails.project.test.class.dir = "target/test-classes"
 grails.project.test.reports.dir = "target/test-reports"
 //grails.project.war.file = "target/${appName}-${appVersion}.war"
 
+grails.project.dependency.resolver = "maven"
+
 grails.project.dependency.resolution = {
     // inherit Grails' default dependencies
     inherits("global") {
@@ -12,23 +14,15 @@ grails.project.dependency.resolution = {
     log "warn" // log level of Ivy resolver, either 'error', 'warn', 'info', 'debug' or 'verbose'
 	legacyResolve false
     repositories {
-      //  grailsPlugins()
-       // grailsHome()
         grailsCentral()
-		
-		mavenLocal()
-		mavenCentral()
-		mavenRepo([
-			name: 'repo.transmartfoundation.org-public',
-			root: 'https://repo.transmartfoundation.org/content/repositories/public/'
-	])
-	
+        mavenCentral()
 
+        mavenRepo "https://repo.transmartfoundation.org/content/repositories/public/"
+        mavenRepo "https://repo.thehyve.nl/content/repositories/public/"
     }
     dependencies {
-        // specify dependencies here under either 'build', 'compile', 'runtime', 'test' or 'provided' scopes eg.
-
-        // runtime 'mysql:mysql-connector-java:5.1.13'
+    	// needed to support folder-management
+        compile 'org.codehaus.groovy.modules.http-builder:http-builder:0.7.1'
     }
     plugins {
 		compile(':resources:1.2.1')
@@ -44,11 +38,7 @@ grails.project.dependency.resolution = {
 		compile(':spring-security-core:2.0-RC2')
 		compile(':quartz:1.0-RC2')
         compile(':mail:1.0')
-		build(":release:2.2.1",
-			":rest-client-builder:1.0.3"
-			) {
-		  export = false
-	  }
+		build(":release:3.1.1")
 
     }
 }
