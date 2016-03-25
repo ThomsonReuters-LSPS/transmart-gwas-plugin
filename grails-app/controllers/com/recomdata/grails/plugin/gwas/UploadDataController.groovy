@@ -144,7 +144,7 @@ class UploadDataController {
         def folder = fmFolderService.getFolderByBioDataObject(experiment)
         def tempFile = new File(grailsApplication.config.com.recomdata.FmFolderService.filestoreDirectory, f.getOriginalFilename())
         f.transferTo(tempFile)
-        fmFolderService.processFile(tempFile, folder, fileName, description)
+        fmFolderService.processFile(folder, tempFile)
         tempFile.delete()
         render(view: "fileComplete");
     }
