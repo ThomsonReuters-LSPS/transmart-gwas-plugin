@@ -142,7 +142,7 @@ class UploadDataController {
         //Get the fmFolder associated with this study
         Experiment experiment = Experiment.findByAccession(accession)
         def folder = fmFolderService.getFolderByBioDataObject(experiment)
-        def tempFile = new File(grailsApplication.config.com.recomdata.FmFolderService.filestoreDirectory, f.getOriginalFilename())
+        def tempFile = new File(grailsApplication.config.com.recomdata.FmFolderService.filestoreDirectory, fileName)
         f.transferTo(tempFile)
         fmFolderService.processFile(folder, tempFile)
         tempFile.delete()
